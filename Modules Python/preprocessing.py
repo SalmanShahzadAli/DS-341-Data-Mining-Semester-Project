@@ -269,7 +269,26 @@ def preprocess_complete_pipeline(df):
         'initial_shape': df.shape,
         'final_shape': df_step3.shape
     }
-
+def create_rfm_features(df):
+    df = df.copy()
+    df['Purchase Date'] = pd.to_datetime(df['Purchase Date'])
+    snapshot_date = df['Purchase Date'].max() + pd.Timedelta(days=1)
+    
+    rfm = df.groupby('Customer ID').agg({
+        'Purchase Date': lambda x: (snapshot_date - x.max()).days,
+        'Customer ID': 'count',
+        'Total Purchase Amount': 'sum'
+    }).rename(columns={
+        'Purchase Date': 'Recency',
+        'Customer ID': 'Purchase Frequency',
+        'Total Purchase Amount': 'Monetary Value'
+    }).reset_index()
+    
+    # Keep other customer-level columns
+    customer_cols = df.drop_duplicates('Customer ID')[['Customer ID', 'Gender', 'Age', 'Churn', 'Payment Method']]
+    rfm = rfm.merge(customer_cols, on='Customer ID', how='left')
+    
+    return rfm
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================

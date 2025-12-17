@@ -14,6 +14,56 @@ from imports_setup import print_section_header, print_subsection_header
 from preprocessing import preprocess_complete_pipeline
 from dataset_loading import load_dataset
 
+def create_customer_rfm(df):
+    """Convert transaction-level data to customer-level RFM dataset"""
+    print_subsection_header("Creating Customer-Level RFM Features")
+    
+    df = df.copy()
+    df['Purchase Date'] = pd.to_datetime(df['Purchase Date'])
+    
+    # Snapshot date: one day after the last purchase
+    snapshot_date = df['Purchase Date'].max() + pd.Timedelta(days=1)
+    
+    # Main RFM + demographic aggregation using proper named aggregation
+    rfm = df.groupby('Customer ID').agg(
+        Recency=('Purchase Date', lambda x: (snapshot_date - x.max()).days),
+        Purchase_Frequency=('Purchase Date', 'count'),           # No space in column name
+        Monetary_Value=('Total Purchase Amount', 'sum'),
+        Customer_Age=('Customer Age', 'first'),
+        Age=('Age', 'first'),
+        Gender=('Gender', 'first'),
+        Churn=('Churn', 'first'),
+        Total_Returns=('Returns', 'sum')                         # Better name
+    ).reset_index()
+    
+    # Add most preferred product category
+    cat_pref = (
+        df.groupby(['Customer ID', 'Product Category'])
+          .size()
+          .reset_index(name='count')
+          .sort_values('count', ascending=False)
+          .drop_duplicates('Customer ID', keep='first')
+          .rename(columns={'Product Category': 'Category_Preference'})
+          [['Customer ID', 'Category_Preference']]
+    )
+    rfm = rfm.merge(cat_pref, on='Customer ID', how='left')
+    
+    # Optional: Add most used payment method (nice for association rules)
+    pay_pref = (
+        df.groupby(['Customer ID', 'Payment Method'])
+          .size()
+          .reset_index(name='count')
+          .sort_values('count', ascending=False)
+          .drop_duplicates('Customer ID', keep='first')
+          .rename(columns={'Payment Method': 'Preferred_Payment'})
+          [['Customer ID', 'Preferred_Payment']]
+    )
+    rfm = rfm.merge(pay_pref, on='Customer ID', how='left')
+    
+    print(f"Successfully created customer-level dataset: {rfm.shape[0]} unique customers")
+    print("Columns:", list(rfm.columns))
+    
+    return rfm
 # ============================================================================
 # DATA PREPARATION FOR MARKET BASKET ANALYSIS
 # ============================================================================
@@ -330,8 +380,9 @@ def perform_association_rule_mining(df):
     """
     print_section_header("ASSOCIATION RULE MINING")
     
+    df_customer = create_customer_rfm(df)
     # Step 1: Prepare binary data
-    binary_data = prepare_binary_data(df)
+    binary_data = prepare_binary_data(df_customer)
     
     # Step 2: Find frequent itemsets
     frequent_itemsets = find_frequent_itemsets(binary_data, min_support=0.10)
@@ -362,8 +413,6 @@ def perform_association_rule_mining(df):
 # ============================================================================
 
 if __name__ == "__main__":
-    print_section_header("SECTION 5: ASSOCIATION RULE MINING")
-    
     # Load and preprocess dataset
     df = load_dataset('ecommerce_customer_data_custom_ratios.csv')
     
