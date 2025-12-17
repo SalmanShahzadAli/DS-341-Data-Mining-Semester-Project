@@ -19,46 +19,84 @@ def create_customer_rfm(df):
     print_subsection_header("Creating Customer-Level RFM Features")
     
     df = df.copy()
-    df['Purchase Date'] = pd.to_datetime(df['Purchase Date'])
+    
+    # Debug: Show available columns
+    print(f"Available columns in input data: {list(df.columns)}")
+    
+    # Helper to find column by multiple possible names
+    def find_col(candidates):
+        for name in candidates:
+            if name in df.columns:
+                return name
+        raise KeyError(f"Required column not found. Tried: {candidates}")
+    
+    # Resolve column names
+    purchase_date_col = find_col(['Purchase Date', 'PurchaseDate', 'purchase_date'])
+    customer_id_col = find_col(['Customer ID', 'CustomerID', 'customer_id'])
+    total_purchase_col = find_col(['Total Purchase Amount', 'TotalPurchaseAmount', 'total_purchase_amount'])
+    customer_age_col = find_col(['Customer Age', 'CustomerAge', 'customer_age'])
+    age_col = find_col(['Age', 'age'])
+    gender_col = find_col(['Gender', 'gender'])
+    churn_col = find_col(['Churn', 'churn'])
+    returns_col = find_col(['Returns', 'returns'])
+    
+    df[purchase_date_col] = pd.to_datetime(df[purchase_date_col])
     
     # Snapshot date: one day after the last purchase
-    snapshot_date = df['Purchase Date'].max() + pd.Timedelta(days=1)
+    snapshot_date = df[purchase_date_col].max() + pd.Timedelta(days=1)
     
     # Main RFM + demographic aggregation using proper named aggregation
-    rfm = df.groupby('Customer ID').agg(
-        Recency=('Purchase Date', lambda x: (snapshot_date - x.max()).days),
-        Purchase_Frequency=('Purchase Date', 'count'),           # No space in column name
-        Monetary_Value=('Total Purchase Amount', 'sum'),
-        Customer_Age=('Customer Age', 'first'),
-        Age=('Age', 'first'),
-        Gender=('Gender', 'first'),
-        Churn=('Churn', 'first'),
-        Total_Returns=('Returns', 'sum')                         # Better name
+    rfm = df.groupby(customer_id_col).agg(
+        Recency=(purchase_date_col, lambda x: (snapshot_date - x.max()).days),
+        Purchase_Frequency=(purchase_date_col, 'count'),
+        Monetary_Value=(total_purchase_col, 'sum'),
+        Customer_Age=(customer_age_col, 'first'),
+        Age=(age_col, 'first'),
+        Gender=(gender_col, 'first'),
+        Churn=(churn_col, 'first'),
+        Total_Returns=(returns_col, 'sum')
     ).reset_index()
     
-    # Add most preferred product category
-    cat_pref = (
-        df.groupby(['Customer ID', 'Product Category'])
-          .size()
-          .reset_index(name='count')
-          .sort_values('count', ascending=False)
-          .drop_duplicates('Customer ID', keep='first')
-          .rename(columns={'Product Category': 'Category_Preference'})
-          [['Customer ID', 'Category_Preference']]
-    )
-    rfm = rfm.merge(cat_pref, on='Customer ID', how='left')
+    # Rename the groupby key column back to standard name
+    rfm = rfm.rename(columns={customer_id_col: 'Customer ID'})
     
-    # Optional: Add most used payment method (nice for association rules)
-    pay_pref = (
-        df.groupby(['Customer ID', 'Payment Method'])
-          .size()
-          .reset_index(name='count')
-          .sort_values('count', ascending=False)
-          .drop_duplicates('Customer ID', keep='first')
-          .rename(columns={'Payment Method': 'Preferred_Payment'})
-          [['Customer ID', 'Preferred_Payment']]
-    )
-    rfm = rfm.merge(pay_pref, on='Customer ID', how='left')
+    # Add most preferred product category (if column exists)
+    product_cat_col = None
+    for name in ['Product Category', 'ProductCategory', 'product_category']:
+        if name in df.columns:
+            product_cat_col = name
+            break
+    
+    if product_cat_col:
+        cat_pref = (
+            df.groupby([customer_id_col, product_cat_col])
+              .size()
+              .reset_index(name='count')
+              .sort_values('count', ascending=False)
+              .drop_duplicates(customer_id_col, keep='first')
+              .rename(columns={product_cat_col: 'Category_Preference', customer_id_col: 'Customer ID'})
+              [['Customer ID', 'Category_Preference']]
+        )
+        rfm = rfm.merge(cat_pref, on='Customer ID', how='left')
+    
+    # Optional: Add most used payment method (if column exists)
+    payment_col = None
+    for name in ['Payment Method', 'PaymentMethod', 'payment_method']:
+        if name in df.columns:
+            payment_col = name
+            break
+    
+    if payment_col:
+        pay_pref = (
+            df.groupby([customer_id_col, payment_col])
+              .size()
+              .reset_index(name='count')
+              .sort_values('count', ascending=False)
+              .drop_duplicates(customer_id_col, keep='first')
+              .rename(columns={payment_col: 'Preferred_Payment', customer_id_col: 'Customer ID'})
+              [['Customer ID', 'Preferred_Payment']]
+        )
+        rfm = rfm.merge(pay_pref, on='Customer ID', how='left')
     
     print(f"Successfully created customer-level dataset: {rfm.shape[0]} unique customers")
     print("Columns:", list(rfm.columns))
@@ -78,25 +116,39 @@ def prepare_binary_data(df):
     df_encoded = df.copy()
     binary_data = pd.DataFrame(index=df_encoded.index)
 
+    # Helper to resolve column names even if upstream uses slightly different labels
+    def _pick_col(candidates, label):
+        for name in candidates:
+            if name in df_encoded.columns:
+                return name
+        raise KeyError(f"Missing required column '{label}' (tried: {candidates})")
+
+    # Resolve core numeric columns with fallbacks
+    freq_col = _pick_col(['Purchase_Frequency', 'Purchase Frequency', 'Purchase_Freq', 'Frequency'], 'Purchase_Frequency')
+    monetary_col = _pick_col(['Monetary_Value', 'Monetary Value', 'Total Purchase Amount'], 'Monetary_Value')
+    recency_col = _pick_col(['Recency'], 'Recency')
+    customer_age_col = _pick_col(['Customer_Age', 'Customer Age'], 'Customer_Age') if any(col in df_encoded.columns for col in ['Customer_Age', 'Customer Age']) else None
+    returns_col = _pick_col(['Total_Returns', 'Returns'], 'Total_Returns') if any(col in df_encoded.columns for col in ['Total_Returns', 'Returns']) else None
+
     # ===================================================================
     # 1. HIGH-VALUE CUSTOMER SEGMENTS (Behavioral Bins)
     # ===================================================================
     print("Creating behavioral segments...")
 
     # Purchase Frequency Bins
-    freq_bins = pd.qcut(df_encoded['Purchase Frequency'], q=3, duplicates='drop')
+    freq_bins = pd.qcut(df_encoded[freq_col], q=3, duplicates='drop')
     binary_data['Freq_Low']  = (freq_bins == freq_bins.cat.categories[0]).astype(int)
     binary_data['Freq_Medium'] = (freq_bins == freq_bins.cat.categories[1] if len(freq_bins.cat.categories) > 1 else False).astype(int)
     binary_data['Freq_High'] = (freq_bins == freq_bins.cat.categories[-1]).astype(int)
 
     # Monetary Value Bins
-    monetary_bins = pd.qcut(df_encoded['Monetary Value'], q=3, duplicates='drop')
+    monetary_bins = pd.qcut(df_encoded[monetary_col], q=3, duplicates='drop')
     binary_data['Spend_Low']  = (monetary_bins == monetary_bins.cat.categories[0]).astype(int)
     binary_data['Spend_Medium'] = (monetary_bins == monetary_bins.cat.categories[1] if len(monetary_bins.cat.categories) > 1 else False).astype(int)
     binary_data['Spend_High'] = (monetary_bins == monetary_bins.cat.categories[-1]).astype(int)
 
     # Recency Bins
-    recency_bins = pd.qcut(df_encoded['Recency'], q=3, duplicates='drop')
+    recency_bins = pd.qcut(df_encoded[recency_col], q=3, duplicates='drop')
     binary_data['Recent_Active'] = (recency_bins == recency_bins.cat.categories[0]).astype(int)  # Low recency = recently active
     binary_data['Moderately_Active'] = (recency_bins == recency_bins.cat.categories[1] if len(recency_bins.cat.categories) > 1 else False).astype(int)
     binary_data['Inactive'] = (recency_bins == recency_bins.cat.categories[-1]).astype(int)
@@ -104,7 +156,7 @@ def prepare_binary_data(df):
     # ===================================================================
     # 2. CATEGORICAL FEATURES (Only Low Cardinality!)
     # ===================================================================
-    safe_categorical = ['Gender', 'Location', 'Product Category', 'Payment Method', 'Category Preference']
+    safe_categorical = ['Gender', 'Category_Preference', 'Preferred_Payment']
     
     print("\nEncoding safe categorical features...")
     for col in safe_categorical:
@@ -134,9 +186,12 @@ def prepare_binary_data(df):
     # ===================================================================
     # 4. LOYALTY & CHURN RISK
     # ===================================================================
-    binary_data['Loyal_Customer'] = (df_encoded['Customer Age'] > 365).astype(int)  # >1 year
-    binary_data['High_Return_Rate'] = (df_encoded.get('Returns', 0) > df_encoded.get('Returns', 0).median()).astype(int)
-    binary_data['Multiple_Purchases'] = (df_encoded['Purchase Frequency'] > 1).astype(int)
+    if customer_age_col and customer_age_col in df_encoded.columns:
+        binary_data['Loyal_Customer'] = (df_encoded[customer_age_col] > 365).astype(int)  # >1 year
+    if returns_col and returns_col in df_encoded.columns:
+        returns_series = df_encoded[returns_col]
+        binary_data['High_Return_Rate'] = (returns_series > returns_series.median()).astype(int)
+    binary_data['Multiple_Purchases'] = (df_encoded[freq_col] > 1).astype(int)
 
     # ===================================================================
     # FINAL RESULT
@@ -380,19 +435,27 @@ def perform_association_rule_mining(df):
     """
     print_section_header("ASSOCIATION RULE MINING")
     
+    # Sample data for faster execution on large datasets
+    if len(df) > 100000:
+        print(f"⚡ Large dataset detected ({len(df):,} rows). Sampling 50% for faster ARM...")
+        df = df.sample(frac=0.5, random_state=42)
+        print(f"   Using {len(df):,} rows for analysis\n")
+    
     df_customer = create_customer_rfm(df)
+    print(f"Customer-level records: {len(df_customer):,}")
+    
     # Step 1: Prepare binary data
     binary_data = prepare_binary_data(df_customer)
     
-    # Step 2: Find frequent itemsets
-    frequent_itemsets = find_frequent_itemsets(binary_data, min_support=0.10)
+    # Step 2: Find frequent itemsets (aggressive threshold for large dataset)
+    frequent_itemsets = find_frequent_itemsets(binary_data, min_support=0.25)
     
     if len(frequent_itemsets) < 2:
         print("\n⚠ Not enough frequent itemsets for rules generation")
         return None, None
     
-    # Step 3: Generate association rules
-    rules = generate_association_rules(frequent_itemsets, min_confidence=0.5, min_lift=1.2)
+    # Step 3: Generate association rules (higher thresholds for speed)
+    rules = generate_association_rules(frequent_itemsets, min_confidence=0.6, min_lift=1.3)
     
     if len(rules) > 0:
         # Step 4: Analyze rules
